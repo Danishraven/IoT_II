@@ -9,15 +9,20 @@
 #include "Diode.h"
 #include <array>
 #include <vector>
+#include "secrets.h"
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
 
+
+constexpr const char* _ENVIROMENT_ =  ENVIROMENT;
 /* You only need to format SPIFFS the first time you run a
    test or else use the SPIFFS plugin to create a partition
    https://github.com/me-no-dev/arduino-esp32fs-plugin */
 #define FORMAT_SPIFFS_IF_FAILED true
 
 // Pin definitions
-#define outputs {2, 4, 18, 19}
-#define inputs {32, 35, 34, 39}
+#define outputs {02, 04, 18, 19}
+#define inputs  {32, 35, 34, 39}
 
 // Debounce delay in milliseconds
 #define debounceDelay 50
@@ -26,36 +31,50 @@
 #define uS_TO_S_FACTOR 1000000  /* Conversion factor for micro seconds to seconds */
 #define TIME_TO_SLEEP  36000        /* Time ESP32 will go to sleep (in seconds) */
 
+// Attempt definitions
+#define MAX_SPIFFS_ATTEMPTS 10
+#define MAX_UPLOAD_ATTEMPTS 10
+
+// Wifi definitions
+constexpr const char* _WIFI_SSID_ =  WIFI_SSID;
+constexpr const char* _WIFI_PASSWORD_ = WIFI_PASSWORD;
+
+// MQTT definitions
+constexpr const char* _MQTT_SERVER_ = MQTT_SERVER;
+constexpr const int _MQTT_PORT_ = MQTT_PORT;
+constexpr const char* _MQTT_ROOT_CA_ = MQTT_ROOT_CA;
+constexpr const char* _MQTT_USER_ = MQTT_USER; 
+constexpr const char* _MQTT_PASS_ = MQTT_PASS;
+constexpr const char* _MQTT_TOPIC_ = MQTT_TOPIC;
+
 
 // function declarations
-void SetupPin(int pin, int mode, int value);
-void TogglePins(const int *pins, size_t count);
-void TogglePin(int pin);
-void Print_wakeup_reason();
-void InitWiFi();
-void ListDir(fs::FS &fs, const char * dirname, uint8_t levels);
-void ReadFile(fs::FS &fs, const char * path);
-void WriteFile(fs::FS &fs, const char * path, const char * message);
-void AppendFile(fs::FS &fs, const char * path, const char * message);
-void RenameFile(fs::FS &fs, const char * path1, const char * path2);
-void DeleteFile(fs::FS &fs, const char * path);
-void WakeupExt1Handler();
-void WakeupTimerHandler();
-bool IsMounted();
-uint64_t PinsToMask(const int *pins, size_t count);
-int IndexOfArray(const int *arr, size_t count, int value);
+void setupPin(int pin, int mode, int value);
+void print_wakeup_reason();
+void initWiFi();
+String readFile(fs::FS &fs, const char * path);
+bool writeFile(fs::FS &fs, const char * path, const char * message);
+bool appendFile(fs::FS &fs, const char * path, const char * message);
+bool deleteFile(fs::FS &fs, const char * path);
+void wakeupExt1Handler();
+void wakeupTimerHandler();
+uint64_t pinsToMask(const int *pins, size_t count);
+int indexOfArray(const int *arr, size_t count, int value);
 void handleButtonState(size_t idx, bool pressed);
 void recordButtonEvent(int idx);
 void appendEventsToFile();
 String getLocalTime();
 String getLocalTimeString();
 void PrintLocalTime();
+void idleSleep();
+bool mountSPIFFS();
+int checkPowerLevel();
 
 // fields
+
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 3600;
 const int   daylightOffset_sec = 3600;
-bool mountSuccess = false;
 const int outputPins[] = outputs;
 const int inputPins[] = inputs;
 constexpr size_t outputCount = sizeof(outputPins) / sizeof(outputPins[0]);
@@ -73,7 +92,7 @@ std::vector<ButtonEvent> eventLog;
 
 void setup() {
   Serial.begin(115200);
-  InitWiFi();
+  initWiFi();
   // prepare prevInputState so we can detect changes in loop()
   prevInputState.resize(inputCount);
   for (size_t i = 0; i < inputCount; ++i) {
@@ -83,18 +102,16 @@ void setup() {
   }
   
   for (size_t i = 0; i < outputCount; ++i) {
-    SetupPin(outputPins[i], OUTPUT, LOW);
+    setupPin(outputPins[i], OUTPUT, LOW);
     diodes[i].setPin(outputPins[i]);
   }
   
-  uint64_t wakeupMask = PinsToMask(inputPins, inputCount);
+  uint64_t wakeupMask = pinsToMask(inputPins, inputCount);
   esp_sleep_enable_ext1_wakeup(wakeupMask, ESP_EXT1_WAKEUP_ANY_HIGH); // Enable wakeup on any input pin high
-  Print_wakeup_reason();
+  print_wakeup_reason();
   //esp_deep_sleep(TIME_TO_SLEEP * uS_TO_S_FACTOR); // Sleep for defined time
   //esp_deep_sleep_start();
   timeSinceLastPressMillis = millis();
-
-  Serial.println("Setup complete.");
 }
 
 void loop() {
@@ -109,52 +126,38 @@ void loop() {
 
   // Idle timeout => append events and deep sleep
   if ((millis() - timeSinceLastPressMillis) >= idleMs) {
-    Serial.println("Idle timeout reached (2 min). Saving events and entering deep sleep...");
-    // append collected events to SPIFFS
-    if(!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)){
-    mountSuccess = false;
-    Serial.println("SPIFFS Mount Failed");
-    } else {
-      mountSuccess = true;
-    }
-    ReadFile(SPIFFS, "/events.json");
-    appendEventsToFile();
-    delay(50); // let serial flush
-    // deep sleep until external wake (EXT1 wake mask already set in setup)
-    esp_deep_sleep_start();
-    // execution won't continue here until wake
+    idleSleep();
   }
 
   // small sleep to avoid busy-looping; adjust to taste
   delay(20);
 }
 
-void SetupPin(int pin, int mode, int value) {
+void setupPin(int pin, int mode, int value) {
   pinMode(pin, mode);
   digitalWrite(pin, value);
 }
 
-void Print_wakeup_reason() {
+void print_wakeup_reason() {
   esp_sleep_wakeup_cause_t wakeup_reason;
 
   wakeup_reason = esp_sleep_get_wakeup_cause();
   switch (wakeup_reason) {
     case ESP_SLEEP_WAKEUP_EXT1:
-      WakeupExt1Handler();
+      wakeupExt1Handler();
       break;
     case ESP_SLEEP_WAKEUP_TIMER:
-      WakeupTimerHandler();
+      wakeupTimerHandler();
       break;
     default: 
-    Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason); 
     break;
   }
 }
 
-void WakeupExt1Handler() {
+void wakeupExt1Handler() {
   uint64_t wakeup_pin_mask = esp_sleep_get_ext1_wakeup_status();
   int wakeup_pin = __builtin_ctzll(wakeup_pin_mask);
-  int index = IndexOfArray(inputPins, inputCount, wakeup_pin); // -1 if not found
+  int index = indexOfArray(inputPins, inputCount, wakeup_pin); // -1 if not found
   if (index == -1) {
     Serial.printf("Wakeup pin %d not in configured list\n", wakeup_pin);
     return;
@@ -170,26 +173,88 @@ void WakeupExt1Handler() {
   timeSinceLastPressMillis = millis();
 }
 
-void WakeupTimerHandler() {
-  TogglePins(outputPins, outputCount);
-  delay(2000);
-  TogglePins(outputPins, outputCount);
-}
-
-void TogglePins(const int *pins, size_t count) {
-  for (size_t i = 0; i < count; ++i) {
-    TogglePin(pins[i]);
+void wakeupTimerHandler() {
+  // Mount SPIFFS and read event log
+  if (!mountSPIFFS())
+  {
+    return;
   }
+  
+  String data = readFile(SPIFFS, "/events.json");
+
+  // Converting data into JSON array and removing trailing commas
+  data.trim();
+  if (data.length() > 0 && data.charAt(data.length() - 1) == ',') {
+    data = data.substring(0, data.length() - 1);
+  }
+  data = '[' + data + ']';
+  
+
+  int powerLevel = checkPowerLevel();
+
+  // build final JSON object with power level and data array
+  String JSON_object = "{\"power_level\":" + String(powerLevel) + ",\"events\":" + data + "}";
+
+  Serial.println("Event log data:");
+  Serial.println(JSON_object);
+
+  // MQTT upload (TLS) using username/password
+  bool success = false;
+
+  if (JSON_object.length() > 2) { // probably not just []
+    // Ensure WiFi connected
+    if (WiFi.status() != WL_CONNECTED) {
+      initWiFi();
+    }
+    WiFiClientSecure espClient;
+    PubSubClient mqttClient(espClient);
+    bool MQTTIsSetup = false;
+    // Configure MQTT over TLS
+    Serial.println("setting client to insecure");
+    espClient.setInsecure();
+    // espClient.setCACert(MQTT_CA_CERT);
+    mqttClient.setServer(_MQTT_SERVER_, _MQTT_PORT_);
+
+    while (!mqttClient.connected())
+    {
+      Serial.print("Connecting to MQTT over TLS...");
+
+      String clientId = "ESP32-" + String(random(0xffff), HEX);
+
+      if (mqttClient.connect(clientId.c_str(), _MQTT_USER_, _MQTT_PASS_))
+      {
+        Serial.println("connected");
+      }
+      else
+      {
+        Serial.print("failed, rc=");
+        Serial.print(mqttClient.state());
+        Serial.println(" - retrying in 5 seconds");
+        delay(5000);
+      }
+    }
+    mqttClient.setBufferSize(65536);
+    success = mqttClient.publish(_MQTT_TOPIC_, JSON_object.c_str());
+  }
+
+  if (success)
+  {
+    // remove the events file
+    while (!deleteFile(SPIFFS, "/events.json")) {
+      Serial.println("Retrying delete /events.json");
+      delay(200);
+    }
+    Serial.println("Event log cleared.");
+  } else {
+    Serial.println("Upload failed; keeping events on SPIFFS");
+  }
+
+  esp_deep_sleep_start();
 }
 
-void TogglePin(int pin) {
-  int state = digitalRead(pin);
-  digitalWrite(pin, !state);
-}
-
-void InitWiFi() {
+void initWiFi() {
   WiFi.mode(WIFI_STA);
-  WiFi.begin("IoT_H3/4", "98806829");
+  WiFi.begin(_WIFI_SSID_, _WIFI_PASSWORD_);
   Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print('.');
@@ -237,103 +302,65 @@ void PrintLocalTime() {
   }
 }
 
-void ListDir(fs::FS &fs, const char * dirname, uint8_t levels){
-  if (!IsMounted()) return;
-
-  File root = fs.open(dirname);
-  if(!root){
-    Serial.println("- failed to open directory");
-    return;
-  }
-  if(!root.isDirectory()){
-    Serial.println(" - not a directory");
-    return;
-  }
-
-  File file = root.openNextFile();
-  while(file){
-    if(file.isDirectory()){
-      if(levels){
-          ListDir(fs, file.name(), levels -1);
-      }
-    } else {
-      Serial.print("  FILE: ");
-      Serial.print(file.name());
-      Serial.print("\tSIZE: ");
-      Serial.println(file.size());
-    }
-    file = root.openNextFile();
-  }
-}
-
-void ReadFile(fs::FS &fs, const char * path){
-  if (!IsMounted()) return;
+String readFile(fs::FS &fs, const char * path){
   File file = fs.open(path);
   if(!file || file.isDirectory()){
       Serial.println("- failed to open file for reading");
-      return;
+      return String();
   }
-
-  while(file.available()){
-      Serial.write(file.read());
-  }
+  Serial.println("Reading file");
+  String content;
+    while(file.available()){
+      int c = file.read();
+      if (c < 0) break;
+      content += static_cast<char>(c);
+    }
   file.close();
+  return content;
 }
 
-void WriteFile(fs::FS &fs, const char * path, const char * message){
-  if (!IsMounted()) return;
-
+bool writeFile(fs::FS &fs, const char * path, const String message){
   File file = fs.open(path, FILE_WRITE);
   if(!file){
       Serial.println("- failed to open file for writing");
-      return;
+      return false;
   }
   if(!file.print(message)){
       Serial.println("- write failed");
   }
   file.close();
+  return true;
 }
 
-void AppendFile(fs::FS &fs, const char * path, const char * message){
-  if (!IsMounted()) return;
-
+bool appendFile(fs::FS &fs, const char * path, const String message){
+  if (message == "")
+  {
+    return true;
+  }
+  
   File file = fs.open(path, FILE_APPEND);
   if(!file){
       Serial.println("- failed to open file for appending");
-      WriteFile(fs, path, message);
-      return;
+      while (!writeFile(fs, path, message))
+      
+      return false;
   }
   if(!file.print(message)){
       Serial.println("- append failed");
   }
   file.close();
+  return true;
 }
 
-void RenameFile(fs::FS &fs, const char * path1, const char * path2){
-  if (!IsMounted()) return;
-  if (!fs.rename(path1, path2)) {
-    
-      Serial.println("- rename failed");
-  }
-}
-
-void DeleteFile(fs::FS &fs, const char * path){
-  if (!IsMounted()) return;
+bool deleteFile(fs::FS &fs, const char * path){
   if(!fs.remove(path)){
       Serial.println("- delete failed");
+      return false;
   }
+  return true;
 }
 
-bool IsMounted()
-{
-  if (!mountSuccess)
-  {
-    Serial.println("Filesystem not mounted");
-  }
-  return mountSuccess;
-}
-
-uint64_t PinsToMask(const int *pins, size_t count) {
+uint64_t pinsToMask(const int *pins, size_t count) {
   uint64_t mask = 0;
   for (size_t i = 0; i < count; ++i) {
     mask |= (1ULL << pins[i]);
@@ -341,7 +368,7 @@ uint64_t PinsToMask(const int *pins, size_t count) {
   return mask;
 }
 
-int IndexOfArray(const int *arr, size_t count, int value) {
+int indexOfArray(const int *arr, size_t count, int value) {
   for (size_t i = 0; i < count; ++i) {
     if (arr[i] == value) return static_cast<int>(i);
   }
@@ -379,16 +406,15 @@ void recordButtonEvent(int idx) {
 }
 
 void appendEventsToFile() {
-  if (eventLog.empty()) return;
-  if (!mountSuccess) {
-    Serial.println("SPIFFS not mounted; cannot save events");
+  if (!mountSPIFFS())
+  {
+    timeSinceLastPressMillis = millis();
     return;
   }
-
+  
   // Build a compact JSON array for this session: [{"index":0,"time":"2025-11-19 12:34:56"},...]\n
-  String json = "[";
+  String json = "";
   for (size_t i = 0; i < eventLog.size(); ++i) {
-    if (i) json += ",";
     json += "{\"index\":";
     json += String(eventLog[i].index);
     json += ",\"time\":\"";
@@ -396,13 +422,64 @@ void appendEventsToFile() {
     String safe = eventLog[i].time;
     safe.replace("\"", "\\\"");
     json += safe;
-    json += "\"}";
+    json += "\"},";
   }
-  json += "]\n";
 
   // Append to file on SPIFFS (creates file if needed)
-  AppendFile(SPIFFS, "/events.json", json.c_str());
-
+  while (!appendFile(SPIFFS, "/events.json", json))
+  
   // clear in-memory log after writing
   eventLog.clear();
+}
+
+void idleSleep() {
+  // append collected events to SPIFFS
+  appendEventsToFile();
+  delay(50); // let serial flush
+  // calculate how long to sleep until 02:00 next day
+  struct tm timeinfo;
+  uint64_t sleepDurationUs;
+  if (_ENVIROMENT_ == "PRODUCTION")
+  {
+    if (getLocalTime(&timeinfo)) {
+      timeinfo.tm_hour = 2;
+      timeinfo.tm_min = 0;
+      timeinfo.tm_sec = 0;
+      time_t target = mktime(&timeinfo);
+      time_t now = time(NULL);
+      if (target <= now) {
+        // already past 2 AM today -> set to next day
+        target += 24 * 3600;
+      }
+      time_t delta = target - now;
+      sleepDurationUs = static_cast<uint64_t>(delta) * uS_TO_S_FACTOR;
+    } else {
+      Serial.println("Failed to get time; sleeping until awakened externally.");
+      esp_deep_sleep_start();
+    }
+  } else if (_ENVIROMENT_ == "DEVELOPMENT")
+  {
+    sleepDurationUs = 10 * uS_TO_S_FACTOR; // TEMP: sleep 10 seconds for testing
+  }
+  esp_deep_sleep(sleepDurationUs);
+}
+
+bool mountSPIFFS() {
+  int attempts = 0;
+  int maxAttempts = MAX_SPIFFS_ATTEMPTS;
+  while (!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED) && attempts < maxAttempts) {
+    Serial.println("Failed to mount SPIFFS. Retrying...");
+    attempts++;
+    delay(500);
+  }
+  if (attempts == maxAttempts) {
+    Serial.println("Failed to mount SPIFFS after multiple attempts.");
+    return false;
+  }
+  return true;
+}
+
+int checkPowerLevel() {
+  // Placeholder for power level checking logic
+  return 0;
 }
