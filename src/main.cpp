@@ -34,6 +34,7 @@ constexpr const char* _ENVIROMENT_ =  ENVIROMENT;
 // Attempt definitions
 #define MAX_SPIFFS_ATTEMPTS 10
 #define MAX_UPLOAD_ATTEMPTS 10
+#define MAX_DELETE_ATTEMPTS 10
 
 // Wifi definitions
 constexpr const char* _WIFI_SSID_ =  WIFI_SSID;
@@ -81,7 +82,7 @@ constexpr size_t outputCount = sizeof(outputPins) / sizeof(outputPins[0]);
 constexpr size_t inputCount  = sizeof(inputPins)  / sizeof(inputPins[0]);
 String timezone = "CET-1CEST,M3.5.0,M10.5.0/3"; // Central European Time
 unsigned long timeSinceLastPressMillis = 0;
-const unsigned long idleMs = 10UL /*seconds*/ * 1000UL;
+const unsigned long idleMs = 120UL /*seconds*/ * 1000UL;
 
 // instantiate diodes after diode class is defined
 Diode diodes[outputCount];
@@ -109,8 +110,6 @@ void setup() {
   uint64_t wakeupMask = pinsToMask(inputPins, inputCount);
   esp_sleep_enable_ext1_wakeup(wakeupMask, ESP_EXT1_WAKEUP_ANY_HIGH); // Enable wakeup on any input pin high
   print_wakeup_reason();
-  //esp_deep_sleep(TIME_TO_SLEEP * uS_TO_S_FACTOR); // Sleep for defined time
-  //esp_deep_sleep_start();
   timeSinceLastPressMillis = millis();
 }
 
@@ -125,9 +124,20 @@ void loop() {
   }
 
   // Idle timeout => append events and deep sleep
-  if ((millis() - timeSinceLastPressMillis) >= idleMs) {
-    idleSleep();
+  if (_ENVIROMENT_ == "PRODUCTION")
+  {
+    if ((millis() - timeSinceLastPressMillis) >= idleMs) {
+      idleSleep();
+    }
+  } else if (_ENVIROMENT_ == "DEVELOPMENT")
+  {
+    if ((millis() - timeSinceLastPressMillis) >= 10UL /*seconds*/ * 1000UL) {
+      idleSleep();
+    }
   }
+  
+
+  
 
   // small sleep to avoid busy-looping; adjust to taste
   delay(20);
@@ -233,15 +243,18 @@ void wakeupTimerHandler() {
         delay(5000);
       }
     }
-    mqttClient.setBufferSize(65536);
+    mqttClient.setBufferSize(65535);
     success = mqttClient.publish(_MQTT_TOPIC_, JSON_object.c_str());
   }
 
   if (success)
   {
     // remove the events file
-    while (!deleteFile(SPIFFS, "/events.json")) {
+    int attempts = 0;
+    int maxAttempts = MAX_DELETE_ATTEMPTS;
+    while (attempts < maxAttempts && !deleteFile(SPIFFS, "/events.json")) {
       Serial.println("Retrying delete /events.json");
+      attempts++;
       delay(200);
     }
     Serial.println("Event log cleared.");
