@@ -1,22 +1,4 @@
-#pragma once
-#ifndef MQTT_H
-#define MQTT_H
-
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <PubSubClient.h>
-
-// MQTT setup status
-extern bool MQTTIsSetup;
-
-// MQTT broker settings
-static const char *MQTT_SERVER = "wilson.local";
-static const int MQTT_PORT = 8883;
-static const char *MQTT_TOPIC = "esp32/dikshya_jonas/button";
-
-// CA
-static const char MQTT_CA_CERT[] PROGMEM = R"EOF(
+static const char MQTT_ROOT_CA[] PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIDBTCCAe2gAwIBAgIUXopiLMN2tHLH5ALoHzUf4tY5upUwDQYJKoZIhvcNAQEL
 BQAwEjEQMA4GA1UEAwwHTVFUVC1DQTAeFw0yNTExMTYwOTQyMDlaFw0zNTExMTQw
@@ -38,18 +20,14 @@ uOn/9KgYpDzd
 -----END CERTIFICATE-----
 )EOF";
 
-// Setup MQTT Client
-bool mqtt_setup();
+#define WIFI_SSID "TEC-IOT";
+#define WIFI_PASSWORD "42090793";
+#define ALTERNATE_WIFI_SSID "IOT_H3/4";
+#define ALTERNATE_WIFI_PASSWORD "98806829";
+#define MQTT_SERVER "wilson.local";
+#define MQTT_PORT 8883;
+#define MQTT_USER "elev1";
+#define MQTT_PASS "password";
+#define MQTT_TOPIC "esp32/nora_alex/button";
 
-// MQTT loop to maintain connection
-void mqtt_loop();
-
-// Publish a message to the MQTT topic
-bool mqtt_publish(const String &payload);
-
-// Reconnect to MQTT broker if disconnected
-void mqtt_reconnect();
-
-// Attempt to setup MQTT connection
-void TrySetupMQTT();
-#endif
+#define ENVIROMENT "DEVELOPMENT"  // PRODUCTION or DEVELOPMENT
